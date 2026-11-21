@@ -113,3 +113,57 @@ everything merge when they reconnect. Follows the shared baseline
 - The bottlenecks are Redis pub/sub fan-out and Postgres write rate. Batching
   updates (phase 2) and compaction keep Postgres small.
 - Very large documents: cap document size, and lazy-load or split huge documents.
+
+## Beyond the plan
+
+Build these after the phases above. Each starts from a problem real systems hit, and
+each should add a row to the README's Decisions & tradeoffs table. If one wouldn't,
+skip it. B1 is the one to build first.
+
+### B1 — Comments anchored to text
+**Why:** a reviewer comments on a paragraph, then others edit around it. The comment
+must stay attached to the same words.
+1. Anchors are Yjs relative positions (`Y.createRelativePositionFromTypeIndex`) for the
+   start and end of the selection, so concurrent edits don't shift them.
+2. When the anchored text is deleted, the comment becomes orphaned (listed on the side),
+   never lost.
+3. Decide where threads live and record it in the README: Postgres (searchable,
+   permissions enforced by `api`) or a `Y.Map` inside the document (works offline, but
+   anyone with edit access can change it).
+4. Replies, resolve, and @mentions that send an email through Mailpit.
+- **Done when:** a fuzz test makes random edits around 50 anchors, and every anchor still
+  covers its original text or is marked orphaned.
+
+### B2 — Access revoked while offline
+**Why:** a contractor is removed from a document on Friday, edits it offline on a
+flight, and reconnects on Monday. Phase 3 only closes live sockets.
+1. On reconnect, `sync` checks the role again and rejects updates from a user who is no
+   longer an editor, with a clear close reason.
+2. The client doesn't throw away hours of work: it offers "save as a private copy".
+3. That copy also holds the shared content the user just lost access to, and so does
+   their IndexedDB cache. Decide the policy (allow the copy, export only their own
+   edits, or wipe the local copy) and say why in the README.
+- **Done when:** a Playwright test covers that flow: revoke while offline, edit,
+  reconnect, nothing reaches the shared document, and the chosen policy holds.
+
+### B3 — Route documents to replicas by consistent hashing
+**Why:** the README names this as the fix for Redis pub/sub at ~100k active documents.
+Build it and measure it instead of only describing it.
+1. Caddy `lb_policy uri_hash` on `/ws/<docId>` sends every client of a document to the
+   same `sync` replica, so its updates stay on that replica.
+2. After a scale event, existing sockets stay where they are and new ones hash to the
+   new replica, so a document can briefly live on two replicas. Keep the Redis relay for
+   that case, and measure how much traffic it still carries.
+- **Done when:** a README chart compares Redis messages/s and propagation p95 for
+  pub/sub vs hashing at `sync=3`, and scaling from 3 to 4 replicas mid-load loses no edits.
+
+### B4 — Attribution: who wrote this
+**Why:** "who changed the dosage in this protocol?" Version history says when, not who.
+1. Map each Yjs client ID to a user (Yjs `PermanentUserData` does this) and highlight
+   text by author.
+2. A client can claim any client ID or name, so don't trust what it writes. `sync` knows
+   which user each connection belongs to, so it records `client ID → user` itself, in
+   Postgres, from the updates it receives.
+3. Version previews (phase 7) show what changed and who changed it.
+- **Done when:** after an offline merge between two users, every paragraph is attributed
+  to the user who typed it.
