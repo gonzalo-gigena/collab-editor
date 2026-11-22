@@ -4,3 +4,7 @@ services:
     command: ["node", "--watch", "src/server.js"]
     environment:
       NODE_ENV: development
+  sync:
+    command: ["node", "--watch", "src/server.js"]
+    environment:
+      NODE_ENV: development

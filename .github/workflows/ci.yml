@@ -15,8 +15,16 @@ jobs:
       - run: cp .env.example .env
       - name: Unit tests
         run: docker run --rm -v "$PWD/apps/api:/app" -w /app node:26.13-bookworm-slim node --test
+      - name: Sync tests (two clients, oversized, malformed)
+        run: docker run --rm -v "$PWD/apps/sync:/app" -w /app node:26.13.1-bookworm-slim sh -c 'npm ci --no-audit --no-fund && npm test'
       - name: Stack with 3 api replicas + smoke test
         run: sh common/scripts/ci-stack.sh 3
+      - name: Sync tests through Caddy
+        run: |
+          trap 'docker compose -f compose.yaml down -v' EXIT
+          docker compose -f compose.yaml up -d --wait
+          docker run --rm --network host -e SYNC_URL=ws://localhost:8080/ws/sync -v "$PWD/apps/sync:/app" -w /app \
+            node:26.13.1-bookworm-slim npm test || { docker compose -f compose.yaml logs caddy sync; exit 1; }
 
   images:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -25,9 +33,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        app: [api, sync, web]
     steps:
       - uses: actions/checkout@v7
-      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/api" >> "$GITHUB_ENV" # GHCR needs lowercase
+      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/${{ matrix.app }}" >> "$GITHUB_ENV" # GHCR needs lowercase
       # ponytail: QEMU for arm64. Switch to native arm64 runners + manifest merge if builds get slow.
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
@@ -38,9 +49,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v7
         with:
-          context: apps/api
+          context: apps/${{ matrix.app }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE }}:${{ github.sha }},${{ env.IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
