@@ -3,31 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Template up</title>
+  <title>Collaborative editor</title>
   <style>
     :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
     body { max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5; }
-    code { font-size: 1.1em; }
+    .tiptap { min-height: 20rem; padding: 0 1rem; border: 1px solid #8888; border-radius: 4px; }
+    .tiptap:focus-visible { outline: 2px solid Highlight; }
+    [role=alert] { position: sticky; top: 0; z-index: 1; padding: .5rem 0; background: Canvas; }
   </style>
 </head>
 <body>
-  <h1>It runs.</h1>
-  <p>Message from the database: <code id="msg">…</code></p>
-  <p>Served by api replica: <code id="replica">…</code></p>
-  <p>Run <code>docker compose up -d --scale api=3</code> and watch the replica change.</p>
-  <script>
-    async function tick() {
-      try {
-        const r = await fetch('/api/hello');
-        const body = await r.json();
-        document.getElementById('msg').textContent = body.message ?? '(no rows, run: docker compose run --rm seed)';
-        document.getElementById('replica').textContent = body.replica;
-      } catch {
-        document.getElementById('replica').textContent = 'api unreachable';
-      }
-    }
-    tick();
-    setInterval(tick, 1000);
-  </script>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>

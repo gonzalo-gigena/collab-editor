@@ -23,6 +23,9 @@ const pool = new pg.Pool({
 const log = (level, msg, extra = {}) =>
   console.log(JSON.stringify({ ts: new Date().toISOString(), level, msg, replica, ...extra }));
 
+// pg emits 'error' when an idle connection drops. Unhandled, it kills the process.
+pool.on('error', (err) => log('warn', 'idle db connection lost', { error: err.message }));
+
 let draining = false;
 
 // ponytail: a plain lookup table is the router. Swap in Fastify/Hono when a project needs params or middleware.

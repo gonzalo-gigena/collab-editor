@@ -8,6 +8,10 @@ import /common/caddy/snippets.caddy
 		import lb api 8080
 	}
 
+	handle /ws/* {
+		import lb sync 1234
+	}
+
 	handle {
 		root * /srv
 		file_server

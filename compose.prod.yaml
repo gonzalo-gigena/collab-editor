@@ -3,10 +3,18 @@
 # TAG=<git sha>, a strong POSTGRES_PASSWORD, and no `fakes` in COMPOSE_PROFILES.
 services:
   caddy:
+    build: !reset null
+    image: ghcr.io/${IMAGE_REPO:?set IMAGE_REPO=owner/repo}/web:${TAG:-latest}
+    pull_policy: always
     ports: !override
       - "80:80"
       - "443:443"
       - "443:443/udp"
+
+  sync:
+    build: !reset null
+    image: ghcr.io/${IMAGE_REPO:?set IMAGE_REPO=owner/repo}/sync:${TAG:-latest}
+    pull_policy: always
 
   api:
     build: !reset null

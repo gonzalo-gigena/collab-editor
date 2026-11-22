@@ -7,7 +7,7 @@ x-db-url: &db-url postgres://${POSTGRES_USER:?copy .env.example to .env}:${POSTG
 
 services:
   caddy:
-    image: caddy:2.11-alpine
+    build: ./apps/web # Caddy with the built editor in /srv
     ports:
       - "${HTTP_PORT:-8080}:8080"
     environment:
@@ -15,11 +15,26 @@ services:
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./common/caddy:/common/caddy:ro
-      - ./apps/web:/srv:ro
       - caddy_data:/data
     depends_on:
       api:
         condition: service_healthy
+      sync:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      # The admin port, because the site's own port and scheme change with SITE_ADDRESS. A plain
+      # TCP check, because the admin API logs every HTTP request.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "2019"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    develop:
+      watch:
+        - action: rebuild
+          path: ./apps/web
+          ignore: [node_modules/, dist/]
     mem_limit: 128m
     restart: unless-stopped
 
@@ -49,6 +64,30 @@ services:
       migrate:
         condition: service_completed_successfully
     mem_limit: 256m
+    restart: unless-stopped
+
+  # ponytail: one replica. Documents live in its memory until phase 2 (persistence) and phase 6 (Redis).
+  sync:
+    build: ./apps/sync
+    environment:
+      # A 5 MB document of tiny edits is ~350 MB of heap once decoded. Node's default here is too low.
+      NODE_OPTIONS: --max-old-space-size=768
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:1234/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    develop:
+      watch:
+        - action: sync
+          path: ./apps/sync/src
+          target: /app/src
+        - action: rebuild
+          path: ./apps/sync/package.json
+    mem_limit: 1g
     restart: unless-stopped
 
   db:

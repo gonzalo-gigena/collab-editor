@@ -1,0 +1,20 @@
+{
+  "name": "sync",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-timeout=30000 --test-force-exit"
+  },
+  "dependencies": {
+    "@hocuspocus/server": "4.9.0",
+    "lib0": "0.2.120",
+    "yjs": "13.6.33"
+  },
+  "devDependencies": {
+    "@hocuspocus/provider": "4.9.0"
+  }
+}
