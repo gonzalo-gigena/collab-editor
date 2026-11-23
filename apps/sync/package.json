@@ -12,6 +12,7 @@
   "dependencies": {
     "@hocuspocus/server": "4.9.0",
     "lib0": "0.2.120",
+    "pg": "8.23.1",
     "yjs": "13.6.33"
   },
   "devDependencies": {

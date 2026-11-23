@@ -2,6 +2,8 @@ import os from 'node:os';
 import { Server } from '@hocuspocus/server';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
+import pg from 'pg';
+import { append, load } from './persistence.js';
 
 export const DOC = 'default'; // ponytail: one hard-coded document until phase 3 adds a documents table
 const MB = 1024 * 1024;
@@ -59,17 +61,47 @@ function check(message, document, maxDocBytes, sizes) {
   sizes.set(document, size);
 }
 
-export function createServer({ port = 1234, maxDocBytes = 5 * MB, stopOnSignals = true } = {}) {
+/**
+ * Without databaseUrl, documents live only in memory (most tests). With it, each document is
+ * loaded from Postgres and every change is appended to its log, batched for ~1 s.
+ */
+export function createServer({ port = 1234, maxDocBytes = 5 * MB, stopOnSignals = true, databaseUrl, doc = DOC } = {}) {
   const sizes = new WeakMap();
+  const stored = new WeakMap(); // document → state vector already in Postgres
+  const pool = databaseUrl && new pg.Pool({ connectionString: databaseUrl, max: 5 });
+  // pg emits 'error' when an idle connection drops. Unhandled, it kills the process.
+  pool?.on('error', (err) => log('warn', 'idle db connection lost', { error: err.message }));
+  const persistence = pool && {
+    // Hocuspocus calls onStoreDocument after changes, debounced, and right away when the last client
+    // leaves or the server shuts down (SIGTERM). maxDebounce makes steady typing still flush every second.
+    debounce: 1000,
+    maxDebounce: 1000,
+    async onLoadDocument({ document, documentName }) {
+      const update = await load(pool, documentName); // throws if the db is down: the client retries
+      if (update) Y.applyUpdate(document, update);
+      stored.set(document, Y.encodeStateVector(document));
+    },
+    async onStoreDocument({ document, documentName }) {
+      // Everything since the last store, as one update. Hocuspocus runs stores of one document one at a time.
+      // ponytail: a diff always carries the whole delete set, small next to the content it deletes.
+      const sv = Y.encodeStateVector(document);
+      await append(pool, documentName, Y.encodeStateAsUpdate(document, stored.get(document)));
+      stored.set(document, sv); // only after the insert: a failed one is retried in the next batch
+    },
+    async onDestroy() {
+      await pool.end();
+    },
+  };
   const server = new Server({
     port,
     quiet: true,
+    ...persistence,
     stopOnSignals, // Hocuspocus closes every socket and unloads documents on SIGTERM, then exits
     // The first sync message carries the whole document, so allow a little more than the cap.
     // ws closes the socket with 1009 on anything bigger, before it is buffered in full.
     websocketOptions: { maxPayload: maxDocBytes + MB },
     async onConnect({ documentName }) {
-      if (documentName !== DOC) throw new Error(`unknown document ${documentName}`);
+      if (documentName !== doc) throw new Error(`unknown document ${documentName}`);
     },
     async beforeHandleMessage({ update, document, connection, socketId }) {
       try {
@@ -89,6 +121,11 @@ export function createServer({ port = 1234, maxDocBytes = 5 * MB, stopOnSignals 
 
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 1234);
-  await createServer({ port }).listen();
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    log('fatal', 'missing env var DATABASE_URL'); // never run in memory by accident: edits would be lost
+    process.exit(1);
+  }
+  await createServer({ port, databaseUrl }).listen();
   log('info', `listening on :${port}`);
 }
