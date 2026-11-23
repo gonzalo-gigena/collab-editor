@@ -130,11 +130,13 @@ All under the 100 ms target. The first row is what the "Sync tests through Caddy
 
 **Loading a document (phase 2):** 10,000 single-character edits (inserts and deletes at random places) stored as one snapshot plus 499 update rows, the most the log holds before compacting. Timed from a fresh client connecting until it is synced, which includes the Postgres query, merging and applying the log, and sending the document. The persistence test prints it, and CI fails at 300 ms.
 
-| Where | Load to synced | Of which: query / merge + apply |
-|---|---|---|
-| CI runner (GitHub `ubuntu-latest`) | CI_MS | — |
-| Apple M1 laptop, idle | 57 ms | — |
-| Same laptop, other projects' stacks using ~4 cores | 286–671 ms | 3–19 ms / 24–83 ms |
+| Where | Load to synced |
+|---|---|
+| CI runner (GitHub `ubuntu-latest`) | 67.6 ms |
+| Apple M1 laptop, quiet | 57 ms |
+| Same laptop, other projects' stacks using ~4 cores | 286–671 ms |
+
+On the busy laptop the Postgres query took 3–19 ms and merging plus applying the log 24–83 ms. The rest was waiting for CPU.
 
 The document is 154 KB encoded for 8,000 characters, because random insert positions leave one Yjs item per character. Typing in runs packs them far tighter.
 
