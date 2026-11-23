@@ -15,16 +15,21 @@ jobs:
       - run: cp .env.example .env
       - name: Unit tests
         run: docker run --rm -v "$PWD/apps/api:/app" -w /app node:26.13-bookworm-slim node --test
-      - name: Sync tests (two clients, oversized, malformed)
-        run: docker run --rm -v "$PWD/apps/sync:/app" -w /app node:26.13.1-bookworm-slim sh -c 'npm ci --no-audit --no-fund && npm test'
+      - name: Migrations follow the lock rules
+        run: sh common/scripts/check-migrations.sh
+      - name: Sync tests with Postgres (two clients, oversized, malformed, persistence, 10k-edit load)
+        run: |
+          trap 'docker compose -f compose.yaml down -v' EXIT
+          docker compose -f compose.yaml run --rm test
       - name: Stack with 3 api replicas + smoke test
         run: sh common/scripts/ci-stack.sh 3
-      - name: Sync tests through Caddy
+      - name: Sync tests through Caddy, then docker compose restart sync loses no text
         run: |
           trap 'docker compose -f compose.yaml down -v' EXIT
           docker compose -f compose.yaml up -d --wait
           docker run --rm --network host -e SYNC_URL=ws://localhost:8080/ws/sync -v "$PWD/apps/sync:/app" -w /app \
             node:26.13.1-bookworm-slim npm test || { docker compose -f compose.yaml logs caddy sync; exit 1; }
+          sh apps/sync/restart-check.sh || { docker compose -f compose.yaml logs sync; exit 1; }
 
   images:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

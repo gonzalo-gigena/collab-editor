@@ -4,8 +4,8 @@ Several people edit one document in real time, keep editing offline, and everyth
 
 The step-by-step build plan is in [PLAN.md](PLAN.md).
 
-> **Status:** phase 1. Everyone who opens the page edits one shared document in real time, on one `sync` replica.
-> Nothing is saved yet: the text is gone when the last tab closes or `sync` restarts (persistence is phase 2).
+> **Status:** phase 2. Everyone who opens the page edits one shared document in real time, on one `sync` replica.
+> Every change is saved to Postgres within about a second, so the text survives closing every tab and restarting `sync`.
 > There is no auth yet either, so don't expose it publicly (phase 3).
 
 ## Run it
@@ -34,7 +34,9 @@ Cloned without `--recurse-submodules`? Run `git submodule update --init`.
 | Load test at 1, 2, 4 replicas | `sh common/scripts/scale.sh` |
 | Metrics (Prometheus) | `docker compose --profile observability up -d`, then http://localhost:9090 |
 | Unit tests | `docker run --rm -v "$PWD/apps/api:/app" -w /app node:26.13-bookworm-slim node --test` |
-| Sync tests | `docker run --rm -v "$PWD/apps/sync:/app" -w /app node:26.13.1-bookworm-slim sh -c 'npm ci && npm test'` |
+| Sync tests (with Postgres) | `docker compose run --rm test` |
+| Restarting `sync` loses no text (stack running) | `sh apps/sync/restart-check.sh` |
+| Lint migrations | `sh common/scripts/check-migrations.sh` |
 | Sync tests through Caddy (stack running) | `cd apps/sync && npm ci && SYNC_URL=ws://localhost:8080/ws/sync npm test` |
 | New migration | add `infra/db/migrations/00000N_name.up.sql` + `.down.sql`, restart |
 | Update shared code | `git submodule update --remote common` |
@@ -59,7 +61,7 @@ flowchart LR
   caddy --> api
   caddy --> sync
   api --> db
-  sync -.->|"batched appends, ~1 s"| db
+  sync -->|"batched appends, ~1 s"| db
   sync <-.->|"updates, presence, revocations"| redis
   api -.->|"sessions"| redis
   class local,redis planned
@@ -68,13 +70,14 @@ flowchart LR
 
 Solid boxes and arrows run today. Dashed ones are planned in [PLAN.md](PLAN.md).
 
-Edits travel over a WebSocket to `sync`, which merges them and relays them to everyone else in the document. Once phases 2 and 6 are built, Postgres keeps an append-only log of updates plus periodic snapshots, and Redis relays updates between `sync` replicas.
+Edits travel over a WebSocket to `sync`, which merges them and relays them to everyone else in the document. About once a second `sync` appends what changed to an update log in Postgres (`doc_updates`), and every 500 rows it merges the log into one snapshot (`doc_snapshots`). Loading a document reads the snapshot plus the rows after it. Once phase 6 is built, Redis relays updates between `sync` replicas.
 
 ## Stack
 
 - **api:** Node 26 (`node:http` + `pg`), plain JavaScript. Stateless, so it scales with `--scale api=N`.
-- **sync:** Node 26 + Hocuspocus 4. One hard-coded document, held in memory, capped at 5 MB encoded.
-  One replica only until phase 6: a second one would have its own separate copy of the document.
+- **sync:** Node 26 + Hocuspocus 4 + `pg`. One hard-coded document, capped at 5 MB encoded, kept in memory
+  while anyone has it open and persisted to Postgres. It refuses to start without `DATABASE_URL`, so it never runs
+  memory-only by accident. One replica only until phase 6: a second one would hold its own copy of the document in memory.
 - **web:** React, Vite and TipTap, built into the Caddy image.
 - **Caddy:** the only service with a host port. It load-balances `/api/*` across every
   replica (`import lb api 8080`, from common), sends `/ws/*` to `sync` and serves the built editor.
@@ -97,8 +100,9 @@ profile. Caddy gets TLS automatically. CI pushes multi-arch images to GHCR on ev
 |---|---|---|---|
 | Merging concurrent edits | Yjs (a CRDT) | Operational transform (ShareDB) | A CRDT merges edits made offline without a server ordering every operation. OT needs that server, so offline editing breaks. Cost: deleted text leaves tombstones, so a document only grows until compacted. |
 | Sync server | Hocuspocus | A hand-written `y-websocket` server | Auth hooks, persistence hooks and a Redis extension already exist, so there's less code to get wrong. |
-| Storage | Append-only update log, plus a snapshot every ~500 updates (`bytea` in Postgres) | Rewriting the whole document on every save | Appends are cheap and never overwrite an edit. Snapshots keep loads fast. Cost: compaction could delete an update that commits late, so append and compaction take the same advisory lock per document. |
-| Write rate | Batch updates for ~1 s per document | One INSERT per keystroke | Postgres writes are the bottleneck. A crash loses at most ~1 s on the server, and clients send it again on reconnect, because Yjs syncs by state vector in both directions. |
+| Storage | Append-only update log, plus a snapshot every 500 rows (`bytea` in Postgres) | Rewriting the whole document on every save | Appends are cheap and never overwrite an edit. Snapshots keep loads fast. Cost: compaction could delete an update that commits late, so append and compaction take the same `pg_advisory_xact_lock` per document. Compaction runs inside the append that reaches 500 rows, under that lock. A test fires 200 appends at once on 10 connections, compacting every 7 rows: without the lock it loses edits every run. |
+| Loading | Snapshot plus later rows in one `UNION ALL` statement | Two queries | One statement sees one consistent view. With two, a compaction committing between them would hide the rows it folded into the new snapshot. |
+| Write rate | Batch for ~1 s per document: Hocuspocus's `onStoreDocument` debounce (1 s, max 1 s), storing the diff since the last stored state vector | One INSERT per keystroke, or the whole document each time | Postgres writes are the bottleneck. On SIGTERM (`docker compose restart sync`) Hocuspocus flushes pending batches before exiting, so nothing is lost. A crash loses at most ~1 s on the server, and clients send it again on reconnect, because Yjs syncs by state vector in both directions. Cost: each diff carries the document's whole delete set, which is small next to the text it deleted. |
 | Several sync replicas | Redis pub/sub between replicas, so any replica serves any document | Routing each document to one replica | Plain round-robin works, and a replica can die without a handoff. Cost: one Redis carries all the fan-out. |
 | Document size | 5 MB encoded, WebSocket messages 6 MB. Over either, the client is dropped and its editor turns read-only with a notice | Trimming, or silently ignoring the update | Ignoring leaves that client showing text nobody else has. Cost: a document at the cap may even refuse deletes, because those add bytes until merged. |
 | Hostile updates | Checked before they are applied: must decode, must not point at their own future items, and nest at most 100 levels | Trusting Yjs to throw | `y-protocols` swallows apply errors and acks them, and a deeply nested value decodes but breaks encoding for everyone who joins later. Cost: each update is decoded twice. |
@@ -107,7 +111,7 @@ profile. Caddy gets TLS automatically. CI pushes multi-arch images to GHCR on ev
 | Load balancing | Caddy `dynamic a` upstreams (the `lb` snippet in `common/`) | `reverse_proxy api:8080`, Traefik | Caddy re-reads Docker DNS every 5 s, so `--scale api=N` needs no config change and no Docker socket mount. A plain `reverse_proxy api:8080` is a single upstream to Caddy and doesn't reliably spread load. |
 | Migrations | A one-shot `migrate` service that finishes before the api starts | Each replica migrating on boot | Replicas starting together would race on the same migration. |
 
-Rows for parts that aren't built yet record the plan's choice. Each one gets confirmed or revised when that phase is built.
+Rows for parts that aren't built yet (phase 3 onwards) record the plan's choice. Each one gets confirmed or revised when that phase is built.
 
 ## Scaling
 
@@ -123,6 +127,16 @@ Rows for parts that aren't built yet record the plan's choice. Each one gets con
 | Two browser tabs, key presses, keydown in A until it's in B's DOM | 30 | 9.4 ms | 45.3 ms | 51.3 ms |
 
 All under the 100 ms target. The first row is what the "Sync tests through Caddy" command prints, and CI fails if its p95 reaches 100 ms.
+
+**Loading a document (phase 2):** 10,000 single-character edits (inserts and deletes at random places) stored as one snapshot plus 499 update rows, the most the log holds before compacting. Timed from a fresh client connecting until it is synced, which includes the Postgres query, merging and applying the log, and sending the document. The persistence test prints it, and CI fails at 300 ms.
+
+| Where | Load to synced | Of which: query / merge + apply |
+|---|---|---|
+| CI runner (GitHub `ubuntu-latest`) | CI_MS | — |
+| Apple M1 laptop, idle | 57 ms | — |
+| Same laptop, other projects' stacks using ~4 cores | 286–671 ms | 3–19 ms / 24–83 ms |
+
+The document is 154 KB encoded for 8,000 characters, because random insert positions leave one Yjs item per character. Typing in runs packs them far tighter.
 
 **HTTP (skeleton):** k6 with 20 virtual users for 20 s against `GET /api/hello`, which reads one row from Postgres through Caddy. Run on an Apple M1 laptop with 8 CPUs and 8 GB given to Docker, with the dev override left out:
 
@@ -144,7 +158,7 @@ COMPOSE_FILE=compose.yaml sh common/scripts/scale.sh
 |---|---|---|
 | `api` | `--scale api=N` (stateless) | Postgres connections. Add PgBouncer past ~2 replicas. |
 | `sync` | One replica today. From phase 6, `--scale sync=N` with Redis relaying updates | A WebSocket stays on the replica it first reached. Only new connections spread. |
-| Postgres | One primary | Write rate of the update log. Batching and compaction keep it small. |
+| Postgres | One primary | Write rate of the update log: one row per active document per second at most. Compaction keeps each document's log under 500 rows. |
 | Redis | One instance | Pub/sub fan-out across all active documents. |
 
 ### Where it breaks next

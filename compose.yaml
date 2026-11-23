@@ -66,10 +66,11 @@ services:
     mem_limit: 256m
     restart: unless-stopped
 
-  # ponytail: one replica. Documents live in its memory until phase 2 (persistence) and phase 6 (Redis).
+  # ponytail: one replica until phase 6 relays updates between replicas through Redis.
   sync:
     build: ./apps/sync
     environment:
+      DATABASE_URL: *db-url
       # A 5 MB document of tiny edits is ~350 MB of heap once decoded. Node's default here is too low.
       NODE_OPTIONS: --max-old-space-size=768
     init: true
@@ -87,6 +88,11 @@ services:
           target: /app/src
         - action: rebuild
           path: ./apps/sync/package.json
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     mem_limit: 1g
     restart: unless-stopped
 
@@ -123,6 +129,20 @@ services:
     volumes:
       - ./infra/db/seed.sql:/seed.sql:ro
     command: ["psql", *db-url, "-v", "ON_ERROR_STOP=1", "-f", "/seed.sql"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Sync tests against a real Postgres, inside the compose network: docker compose run --rm test
+  test:
+    image: node:26.13.1-bookworm-slim
+    profiles: [tools]
+    working_dir: /app
+    volumes:
+      - ./apps/sync:/app
+    environment:
+      DATABASE_URL: *db-url
+    command: ["sh", "-c", "npm ci --no-audit --no-fund && npm test"]
     depends_on:
       migrate:
         condition: service_completed_successfully
